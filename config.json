@@ -1,0 +1,12 @@
+{
+    "valid_images_path": "DNI-Validos",
+    "invalid_images_path": "DNI-Invalidos",
+    "test_size": 0.2,
+    "val_size": 0.2,
+    "seed": 42,
+    "input_size": "(224, 224)",
+    "batch_size": 64,
+    "num_epochs": 10,
+    "learning_rate": 0.001,
+    "model_name": "ResNet18_dni_adjusted"
+}
