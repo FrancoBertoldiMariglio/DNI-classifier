@@ -3,15 +3,7 @@ import os
 from tools.utils import train_and_validate, test, classify, calculate_metrics, convert_to_serializable
 
 
-def run(train_dataloader, val_dataloader, test_dataloader, model, criterion, optimizer, model_name, num_epochs=15):
-
-    # Definir el dispositivo (GPU o CPU)
-    if torch.cuda.is_available():
-        device = torch.device('cuda')
-    elif torch.mps.is_available():
-        device = torch.device('mps')
-    else:
-        device = torch.device('cpu')
+def run(train_dataloader, val_dataloader, test_dataloader, model, criterion, optimizer, model_name, device, num_epochs=15):
 
     model = model.to(device)
 

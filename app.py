@@ -36,10 +36,11 @@ async def predict(request: ImageRequest):
 
     # Load the model for prediction endpoint
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     model = ResNet18()
 
     try:
-        model.load_state_dict(torch.load('best_modelResNet18_dni_adjusted.pth'))
+        model.load_state_dict(torch.load('best_modelResNet18_dni_adjusted.pth', map_location=torch.device('cpu')))
     except FileNotFoundError:
         raise HTTPException(status_code=500, detail="Model not found")
 
@@ -125,7 +126,7 @@ async def train_model():
         optimizer = optim.Adam(train_model.parameters(), lr=learning_rate)
 
         # Run training
-        run(train_dataloader, val_dataloader, test_dataloader, train_model, criterion, optimizer, model_name, num_epochs)
+        run(train_dataloader, val_dataloader, test_dataloader, train_model, criterion, optimizer, model_name, device, num_epochs)
 
         return {"message": "Training completed successfully"}
 
