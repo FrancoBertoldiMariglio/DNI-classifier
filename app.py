@@ -71,8 +71,8 @@ async def predict(request: ImageRequest):
 async def train_model():
     try:
         # Configurations
-        valid_images_path = 'DNI-Validos'
-        invalid_images_path = 'DNI-Invalidos'
+        valid_images_path = 'dataset/valid'
+        invalid_images_path = 'dataset/invalid'
         test_size = 0.2
         val_size = 0.2
         seed = 42

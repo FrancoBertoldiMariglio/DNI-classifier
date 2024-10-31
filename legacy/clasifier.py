@@ -154,12 +154,12 @@ def classify_dni(image, thresholds=None):
 
 
 if __name__ == '__main__':
-    # image_path_valid: str = 'DNI-Validos/Documento_Nacional_Identidad_Dorso_Versión_1_1a9ddb03-b8f1-47dd-aae4-b1d7f2627b3c.jpeg'
+    # image_path_valid: str = 'valid/Documento_Nacional_Identidad_Dorso_Versión_1_1a9ddb03-b8f1-47dd-aae4-b1d7f2627b3c.jpeg'
     # image_valid = Image.open(image_path_valid)
     # result, _ = classify_dni(image_valid)
     # print(result)
 
-    image_path_invalid = '../DNI-Invalidos/IMG_20241023_122058232.jpg'
+    image_path_invalid = '../dataset/invalid/IMG_20241023_122058232.jpg'
     image_invalid = Image.open(image_path_invalid)
     result, _ = classify_dni(image_invalid)
     print(result)
