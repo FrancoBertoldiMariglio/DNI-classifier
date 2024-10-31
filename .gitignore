@@ -3,3 +3,4 @@
 /dataset/valid
 best_modelResNet18_dni_adjusted.pth
 best_model_ResNet50_few_shot.pth
+best_model_ResNet50_one_class.pth

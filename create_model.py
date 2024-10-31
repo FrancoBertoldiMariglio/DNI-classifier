@@ -1,381 +1,370 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-import torchvision.transforms as transforms
-from torchvision.models import resnet50
-import os
-from PIL import Image
-import numpy as np
+import torchvision.models as models
+from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
-from torch.optim.lr_scheduler import ReduceLROnPlateau
-
-exp_config = dict()
-
-# Configuración de dataset y división
-exp_config['test_size'] = 0.2
-exp_config['val_size'] = 0.2
-exp_config['seed'] = 42
-
-# Configuración del modelo
-exp_config['input_size'] = (224, 224)  # Tamaño para ResNet
-exp_config['n_channels'] = 3
-exp_config['backbone'] = 'resnet50'
-
-# Hiperparámetros de entrenamiento
-exp_config['n_episodes'] = 200
-exp_config['n_support'] = 5  # Muestras de soporte por clase
-exp_config['n_query'] = 10   # Muestras de consulta por clase
-exp_config['learning_rate'] = 1e-3
-exp_config['weight_decay'] = 1e-4
-
-# Configuración adicional
-exp_config['device'] = 'mps' if torch.mps.is_available() else 'cpu'
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+import os
+import torch
+import numpy as np
+from PIL import Image
+import torchvision.transforms as transforms
 
 
-class FewShotImageDataset(Dataset):
-    def __init__(self, image_paths, labels, transform=None):
+class IDOneClassClassifier(nn.Module):
+    def __init__(self, pretrained=True, feature_extract=True):
         """
-        Custom dataset for few-shot learning
+        One-Class Classification model for ID images using ResNet
 
         Args:
-            image_paths (list): List of image file paths
-            labels (list): Corresponding labels
-            transform (callable, optional): Optional image transformations
+            pretrained (bool): Use pretrained weights
+            feature_extract (bool): Only train final layers
         """
-        self.image_paths = image_paths
-        self.labels = labels
-        self.transform = transform or self._get_default_transforms()
+        super(IDOneClassClassifier, self).__init__()
 
-    def _get_default_transforms(self):
-        """
-        Generate default image transformations
-        """
-        return transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomRotation(10),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                 std=[0.229, 0.224, 0.225])
-        ])
+        # Use ResNet-50 as base model
+        self.base_model = models.resnet50(pretrained=pretrained)
 
-    def __len__(self):
-        return len(self.image_paths)
+        # Freeze base model parameters if feature extracting
+        if feature_extract:
+            for param in self.base_model.parameters():
+                param.requires_grad = False
 
-    def __getitem__(self, idx):
-        image = Image.open(self.image_paths[idx]).convert('RGB')
-        if self.transform:
-            image = self.transform(image)
-        return image, self.labels[idx]
+        # Modify the final layers
+        num_ftrs = self.base_model.fc.in_features
 
-
-class PrototypicalNetwork(nn.Module):
-    def __init__(self, num_classes=2):
-        """
-        Prototypical Network for Few-Shot Learning
-
-        Args:
-            num_classes (int): Number of classes
-        """
-        super(PrototypicalNetwork, self).__init__()
-
-        # Use ResNet50 as feature extractor
-        backbone = resnet50(pretrained=True)
-        self.feature_extractor = nn.Sequential(*list(backbone.children())[:-1])
-
-        # Freeze backbone layers
-        for param in self.feature_extractor.parameters():
-            param.requires_grad = False
-
-        # Learnable projection layers
-        self.projection = nn.Sequential(
-            nn.Linear(2048, 512),
+        # Custom feature extraction layers
+        self.feature_extractor = nn.Sequential(
+            nn.Linear(num_ftrs, 512),
             nn.BatchNorm1d(512),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             nn.Dropout(0.5),
-            nn.Linear(512, 256)
+            nn.Linear(512, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.3)
         )
+
+        # Remove original fully connected layer
+        self.base_model.fc = nn.Identity()
 
     def forward(self, x):
         """
-        Forward pass for feature extraction
+        Forward pass through the network
 
         Args:
-            x (tensor): Input images
+            x (torch.Tensor): Input image tensor
 
         Returns:
-            tensor: Projected feature embeddings
+            torch.Tensor: Extracted features
         """
-        features = self.feature_extractor(x).squeeze()
-        return self.projection(features)
+        # Extract base features
+        base_features = self.base_model(x)
 
-    def compute_prototypes(self, support_features, support_labels):
+        # Apply custom feature extraction
+        features = self.feature_extractor(base_features)
+
+        return features
+
+
+class IDOneClassTrainer:
+    def __init__(self, input_shape=(3, 224, 224), nu=0.1,
+                 device='mps' if torch.mps.is_available() else 'cpu'):
         """
-        Compute class prototypes from support set
+        Initialize One-Class Classification Trainer for ID images
 
         Args:
-            support_features (tensor): Feature embeddings of support set
-            support_labels (tensor): Labels of support set
+            input_shape (tuple): Input image shape
+            nu (float): Anomaly sensitivity parameter
+            device (str): Computing device
+        """
+        self.device = torch.device(device)
+        self.model = IDOneClassClassifier().to(self.device)
+        self.nu = nu
+        self.radius = torch.tensor(0.).to(self.device)
+        self.center = None
+
+        # Data augmentation for ID images
+        self.transform = A.Compose([
+            A.Resize(224, 224),
+            A.augmentations.transforms.GaussNoise(p=0.2),
+            A.RandomBrightnessContrast(p=0.2),
+            A.HorizontalFlip(p=0.2),
+            A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.1,
+                               rotate_limit=15, p=0.2),
+            A.Normalize(mean=[0.485, 0.456, 0.406],
+                        std=[0.229, 0.224, 0.225]),
+            ToTensorV2()
+        ])
+
+    def _preprocess_data(self, X):
+        """
+        Preprocess input images
+
+        Args:
+            X (numpy.ndarray): Input images
 
         Returns:
-            dict: Prototype vectors for each class
+            torch.Tensor: Preprocessed and augmented images
         """
-        prototypes = {}
-        for label in torch.unique(support_labels):
-            mask = support_labels == label
-            prototypes[label.item()] = support_features[mask].mean(0)
-        return prototypes
+        # Apply transformations to batch of images
+        transformed_images = []
+        for img in X:
+            # Ensure the image is in the right format (HWC)
+            if img.shape[0] in [1, 3]:  # If CHW, transpose
+                img = img.transpose(1, 2, 0)
 
-    def predict(self, query_features, prototypes):
+            # Convert to uint8 if not already
+            if img.dtype == np.float32 or img.dtype == np.float64:
+                img = (img * 255).astype(np.uint8)
+
+            # Apply augmentation
+            transformed = self.transform(image=img)
+            transformed_images.append(transformed['image'])
+
+        return torch.stack(transformed_images).to(self.device)
+
+    def train(self, X, epochs=100, lr=1e-4, weight_decay=1e-5):
         """
-        Predict labels based on distance to prototypes
+        Train the one-class classification model
 
         Args:
-            query_features (tensor): Feature embeddings of query set
-            prototypes (dict): Prototype vectors for each class
-
-        Returns:
-            tensor: Predicted labels
+            X (numpy.ndarray): Training data (normal ID images)
+            epochs (int): Number of training epochs
+            lr (float): Learning rate
+            weight_decay (float): L2 regularization strength
         """
-        predictions = []
-        for feat in query_features:
-            distances = {k: torch.norm(feat - proto) for k, proto in prototypes.items()}
-            pred = min(distances, key=distances.get)
-            predictions.append(pred)
-        return torch.tensor(predictions)
+        # Prepare data
+        X_train, X_val = train_test_split(X, test_size=0.2, random_state=42)
 
-
-class FewShotLearner:
-    def __init__(self, image_dir, test_size=0.2, random_state=42):
-        """
-        Few-Shot Learning Training Pipeline
-
-        Args:
-            image_dir (str): Directory containing images
-            test_size (float): Proportion of dataset for validation
-            random_state (int): Random seed for reproducibility
-        """
-        # self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.device = torch.device("mps" if torch.mps.is_available() else "cpu")
-        self.image_paths, self.labels = self._load_images(image_dir)
-
-        # Split dataset
-        train_paths, val_paths, train_labels, val_labels = train_test_split(
-            self.image_paths, self.labels,
-            test_size=test_size,
-            stratify=self.labels,
-            random_state=random_state
-        )
-
-        # Create datasets
-        self.train_dataset = FewShotImageDataset(train_paths, train_labels)
-        self.val_dataset = FewShotImageDataset(val_paths, val_labels)
-
-        # Model and optimizer
-        self.model = PrototypicalNetwork().to(self.device)
-        self.optimizer = optim.Adam(
+        # Prepare optimizer
+        optimizer = optim.Adam(
             [p for p in self.model.parameters() if p.requires_grad],
-            lr=1e-3,
-            weight_decay=1e-4
-        )
-        self.criterion = nn.CrossEntropyLoss()
-        self.scheduler = ReduceLROnPlateau(
-            self.optimizer,
-            mode='min',
-            factor=0.5,
-            patience=3
+            lr=lr,
+            weight_decay=weight_decay
         )
 
-    def _load_images(self, image_dir):
+        # Training loop
+        for epoch in range(epochs):
+            self.model.train()
+
+            # Preprocess training data
+            X_train_processed = self._preprocess_data(X_train)
+
+            optimizer.zero_grad()
+
+            # Extract features (remove `torch.no_grad()` here)
+            outputs = self.model(X_train_processed)
+
+            # Compute center of the hypersphere
+            center = torch.mean(outputs, dim=0)
+
+            # Compute distances
+            distances = torch.sum((outputs - center) ** 2, dim=1)
+
+            # Compute radius
+            sorted_distances = torch.sort(distances)[0]
+            radius = sorted_distances[int(self.nu * len(sorted_distances))]
+
+            # Compute loss
+            loss = torch.mean(torch.clamp(distances - radius ** 2, min=0))
+
+            # Backward pass
+            loss.backward()
+            optimizer.step()
+
+            # Validation
+            if epoch % 10 == 0:
+                X_val_processed = self._preprocess_data(X_val)
+
+                with torch.no_grad():
+                    val_outputs = self.model(X_val_processed)
+                    val_distances = torch.sum((val_outputs - center) ** 2, dim=1)
+
+                print(f'Epoch [{epoch}/{epochs}], '
+                      f'Loss: {loss.item():.4f}, '
+                      f'Radius: {radius.item():.4f}')
+
+        # Store center and radius
+        self.center = center.detach()
+        self.radius = radius.detach()
+
+    def predict(self, X, threshold_multiplier=1.0):
         """
-        Load images and their labels from directory
+        Predict if samples are within the learned hypersphere
 
         Args:
-            image_dir (str): Directory containing images
+            X (numpy.ndarray): Input ID images
+            threshold_multiplier (float): Adjust anomaly sensitivity
 
         Returns:
-            tuple: List of image paths and corresponding labels
+            numpy.ndarray: Binary predictions (1 for normal, 0 for anomaly)
         """
-        image_paths = []
-        labels = []
-        for label, class_name in enumerate(['valid', 'invalid']):
-            class_dir = os.path.join(image_dir, class_name)
-            for img_name in os.listdir(class_dir):
-                img_path = os.path.join(class_dir, img_name)
-                image_paths.append(img_path)
-                labels.append(label)
-        return image_paths, labels
+        self.model.eval()
 
-    def train_step(self, support_set, query_set):
+        # Preprocess input data
+        X_processed = self._preprocess_data(X)
+
+        with torch.no_grad():
+            # Extract features
+            outputs = self.model(X_processed)
+
+            # Compute distances
+            distances = torch.sum((outputs - self.center) ** 2, dim=1)
+
+            # Apply threshold with multiplier
+            predictions = (distances <= (self.radius * threshold_multiplier) ** 2)
+
+        return predictions.cpu().numpy().astype(int)
+
+    def extract_features(self, X):
         """
-        Single training step with support and query sets
+        Extract features for further analysis
 
         Args:
-            support_set (tuple): Support set images and labels
-            query_set (tuple): Query set images and labels
+            X (numpy.ndarray): Input ID images
 
         Returns:
-            float: Training loss
+            numpy.ndarray: Extracted features
         """
-        support_images, support_labels = support_set
-        query_images, query_labels = query_set
+        self.model.eval()
 
-        support_images = support_images.to(self.device)
-        query_images = query_images.to(self.device)
-        support_labels = support_labels.to(self.device)
-        query_labels = query_labels.to(self.device)
+        # Preprocess input data
+        X_processed = self._preprocess_data(X)
 
-        self.optimizer.zero_grad()
+        with torch.no_grad():
+            features = self.model(X_processed)
 
-        # Extract features
-        support_features = self.model(support_images)
-        query_features = self.model(query_images)
-
-        # Compute prototypes
-        prototypes = self.model.compute_prototypes(support_features, support_labels)
-
-        # Predict labels
-        predictions = self.model.predict(query_features, prototypes)
-
-        # Compute loss
-        loss = self.criterion(
-            query_features,
-            query_labels
-        )
-        loss.backward()
-        self.optimizer.step()
-
-        return loss.item()
-
-    def train(self, n_episodes=100, n_support=5, n_query=10):
-        """
-        Training loop for few-shot learning
-
-        Args:
-            n_episodes (int): Number of training episodes
-            n_support (int): Number of support samples per class
-            n_query (int): Number of query samples per class
-        """
-        best_accuracy = 0
-        best_model_path = 'best_model_ResNet50_few_shot.pth'
-
-        for episode in range(n_episodes):
-            # Sample support and query sets
-            support_set = self._sample_episode(self.train_dataset, n_support, n_query)
-            query_set = self._sample_episode(self.train_dataset, n_support, n_query)
-
-            loss = self.train_step(support_set, query_set)
-
-            # Evaluar cada cierto número de episodios
-            if episode % 10 == 0:
-                print(f"Episode {episode}, Loss: {loss:.4f}")
-
-                # Evaluar el modelo actual
-                current_accuracy = self.evaluate()
-                print(f"Current Accuracy: {current_accuracy * 100:.2f}%")
-
-                # Guardar el mejor modelo
-                if current_accuracy > best_accuracy:
-                    best_accuracy = current_accuracy
-                    torch.save(self.model.state_dict(), best_model_path)
-                    print(f"New best model saved with accuracy: {best_accuracy * 100:.2f}%")
-
-        print(f"Best Model Saved at: {best_model_path}")
-
-    def _sample_episode(self, dataset, n_support, n_query):
-        """
-        Sample support and query sets for an episode
-
-        Args:
-            dataset (Dataset): Input dataset
-            n_support (int): Number of support samples per class
-            n_query (int): Number of query samples per class
-
-        Returns:
-            tuple: Sampled images and labels
-        """
-        unique_labels = np.unique(dataset.labels)
-        episode_images = []
-        episode_labels = []
-
-        for label in unique_labels:
-            label_indices = np.where(np.array(dataset.labels) == label)[0]
-            np.random.shuffle(label_indices)
-
-            support_indices = label_indices[:n_support]
-            query_indices = label_indices[n_support:n_support + n_query]
-
-            for idx in support_indices:
-                episode_images.append(dataset[idx][0])
-                episode_labels.append(label)
-
-            for idx in query_indices:
-                episode_images.append(dataset[idx][0])
-                episode_labels.append(label)
-
-        return (
-            torch.stack(episode_images),
-            torch.tensor(episode_labels)
-        )
-
-    def evaluate(self, n_episodes=50, n_support=5, n_query=10):
-        """
-        Evaluate model performance
-
-        Args:
-            n_episodes (int): Number of evaluation episodes
-            n_support (int): Number of support samples per class
-            n_query (int): Number of query samples per class
-
-        Returns:
-            float: Average accuracy across episodes
-        """
-        accuracies = []
-        for _ in range(n_episodes):
-            support_set = self._sample_episode(self.val_dataset, n_support, n_query)
-            query_set = self._sample_episode(self.val_dataset, n_support, n_query)
-
-            support_images, support_labels = support_set
-            query_images, query_labels = query_set
-
-            # Ensure all tensors are on the same device
-            support_images = support_images.to(self.device)
-            query_images = query_images.to(self.device)
-            support_labels = support_labels.to(self.device)
-            query_labels = query_labels.to(self.device)
-
-            support_features = self.model(support_images)
-            query_features = self.model(query_images)
-
-            prototypes = self.model.compute_prototypes(support_features, support_labels)
-            predictions = self.model.predict(query_features, prototypes)
-
-            # Ensure predictions and query_labels are on the same device
-            predictions = predictions.to(self.device)
-
-            accuracy = (predictions == query_labels).float().mean()
-            accuracies.append(accuracy.item())
-
-        return np.mean(accuracies)
+        return features.cpu().numpy()
 
 
-# Usage example
-def main():
-    # Adjust the path to your image directory
-    image_dir = 'dataset'
+def load_images_from_directory(directory, max_images=None):
+    """
+    Load images from a specified directory
 
-    # Initialize few-shot learner
-    learner = FewShotLearner(image_dir)
+    Args:
+        directory (str): Path to directory containing images
+        max_images (int, optional): Maximum number of images to load
 
-    # Train the model
-    learner.train(n_episodes=200)
+    Returns:
+        numpy.ndarray: Array of loaded images
+    """
+    # Image loading transform
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor()
+    ])
 
-    # Evaluate performance
-    accuracy = learner.evaluate()
-    print(f"Few-Shot Learning Accuracy: {accuracy * 100:.2f}%")
+    images = []
+    # Support common image formats
+    image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff']
+
+    # Iterate through files in directory
+    for filename in os.listdir(directory):
+        # Check if file is an image
+        if any(filename.lower().endswith(ext) for ext in image_extensions):
+            try:
+                # Open and transform image
+                img_path = os.path.join(directory, filename)
+                with Image.open(img_path) as img:
+                    # Convert to RGB to handle different image modes
+                    img = img.convert('RGB')
+                    # Transform and convert to numpy
+                    tensor_img = transform(img)
+                    images.append(tensor_img.numpy())
+
+                # Stop if max images is reached
+                if max_images and len(images) >= max_images:
+                    break
+
+            except Exception as e:
+                print(f"Error loading image {filename}: {e}")
+
+    # Convert to numpy array
+    return np.array(images)
 
 
+def example_usage(dataset_path='dataset',
+                  valid_dir='valid',
+                  invalid_dir='invalid',
+                  max_valid_images=100,
+                  max_invalid_images=20):
+    """
+    Train and test one-class classifier using images from directories
+
+    Args:
+        dataset_path (str): Root directory containing image subdirectories
+        valid_dir (str): Directory name for valid (normal) images
+        invalid_dir (str): Directory name for invalid (anomaly) images
+        max_valid_images (int): Maximum number of valid images to load
+        max_invalid_images (int): Maximum number of invalid images to load
+    """
+    # Construct full paths
+    valid_path = os.path.join(dataset_path, valid_dir)
+    invalid_path = os.path.join(dataset_path, invalid_dir)
+
+    # Validate directories exist
+    if not os.path.exists(valid_path):
+        raise ValueError(f"Valid images directory not found: {valid_path}")
+    if not os.path.exists(invalid_path):
+        raise ValueError(f"Invalid images directory not found: {invalid_path}")
+
+    # Load images
+    print("Loading valid images...")
+    normal_ids = load_images_from_directory(valid_path, max_valid_images)
+
+    print("Loading invalid images...")
+    anomalous_ids = load_images_from_directory(invalid_path, max_invalid_images)
+
+    # Validate image loading
+    if len(normal_ids) == 0:
+        raise ValueError("No valid images found in the directory")
+
+    # Initialize one-class classifier
+    trainer = IDOneClassTrainer(input_shape=(3, 224, 224), nu=0.1)
+
+    print(f"Training on {len(normal_ids)} normal ID images...")
+    # Train on normal IDs
+    trainer.train(normal_ids, epochs=50)
+
+    # Predict on normal and anomalous images
+    print("Predicting on normal images...")
+    normal_predictions = trainer.predict(normal_ids)
+
+    print("Predicting on anomalous images...")
+    anomaly_predictions = trainer.predict(anomalous_ids)
+
+    # Detailed analysis
+    print("\n--- Prediction Results ---")
+    print(f"Total Normal Images: {len(normal_ids)}")
+    print(f"Correctly Identified Normal Images: {np.sum(normal_predictions)} / {len(normal_ids)}")
+
+    print(f"\nTotal Anomalous Images: {len(anomalous_ids)}")
+    print(f"Detected Anomalous Images: {len(anomalous_ids) - np.sum(anomaly_predictions)} / {len(anomalous_ids)}")
+
+    # Optional: Feature extraction for further analysis
+    print("\nExtracting features...")
+    normal_features = trainer.extract_features(normal_ids)
+    anomaly_features = trainer.extract_features(anomalous_ids)
+
+    print("Normal features shape:", normal_features.shape)
+    print("Anomaly features shape:", anomaly_features.shape)
+
+    # Save model (optional)
+    save_path = os.path.join('best_model_ResNet50_one_class.pth')
+    torch.save({
+        'model_state_dict': trainer.model.state_dict(),
+        'center': trainer.center,
+        'radius': trainer.radius
+    }, save_path)
+    print(f"\nModel saved to {save_path}")
+
+
+# Optional: Create a main block for direct script execution
 if __name__ == '__main__':
-    main()
+    try:
+        example_usage()
+    except Exception as e:
+        print(f"An error occurred: {e}")
