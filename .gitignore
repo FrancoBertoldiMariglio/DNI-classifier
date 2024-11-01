@@ -2,3 +2,5 @@
 /DNI-Invalidos
 /DNI-Validos
 best_modelResNet18_dni_adjusted.pth
+/tools/__pycache__
+/tools/__init__.py
