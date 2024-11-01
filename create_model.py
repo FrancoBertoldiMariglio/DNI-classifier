@@ -287,7 +287,7 @@ def load_images_from_directory(directory, max_images=None):
 
 
 def example_usage(dataset_path='dataset',
-                  valid_dir='valid',
+                  valid_dir='imgs_valid',
                   invalid_dir='invalid',
                   max_valid_images=100,
                   max_invalid_images=20):
