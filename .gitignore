@@ -4,3 +4,7 @@
 best_modelResNet18_dni_adjusted.pth
 /tools/__pycache__
 /tools/__init__.py
+best_model.pt
+dni_anomaly_detector.pth
+valid.zip
+valid
