@@ -8,3 +8,14 @@ best_model.pt
 dni_anomaly_detector.pth
 valid.zip
 valid
+YOLODataset/
+YOLODataset_seg/
+dorso_test/
+dorso_test_with_bbox/
+frente/
+frente_test/
+frente_test_with_bbox/
+imgsDorso/
+runs/
+valid_with_bbox/
+yolo11m-seg.pt
