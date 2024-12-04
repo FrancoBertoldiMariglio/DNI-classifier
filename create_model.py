@@ -47,7 +47,7 @@ train_val_df, test_df = train_test_split(mydataset, test_size=test_size, stratif
 train_df, val_df = train_test_split(train_val_df, test_size=val_size, stratify=train_val_df['etiqueta'], random_state=seed)
 
 
-# Definir la clase del dataset
+# Definir la clase del data
 class DniDataset(Dataset):
     def __init__(self, df, transform=None):
         """
