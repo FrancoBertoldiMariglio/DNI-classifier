@@ -5,7 +5,7 @@ from api.routes import lifespan
 
 def create_application() -> FastAPI:
     app = FastAPI(
-        title="RelationNet API",
+        title="Autoencoder API",
         lifespan=lifespan
     )
 
