@@ -73,14 +73,12 @@ class DNIAnomalyDetector:
         self.encoder = Encoder().to(self.device)
         self.decoder = Decoder().to(self.device)
         self.threshold = None
-
-        # Mejores transformaciones para DNIs
         self.transform = transforms.Compose([
             transforms.Resize((224, 224)),
             transforms.ToTensor(),
         ])
 
-    def train_model(self, data_dir, epochs=30, batch_size=64, learning_rate=1e-3, loss_weights=None):
+    def train_model(self, data_dir, model_name, epochs=30, batch_size=64, learning_rate=1e-3, loss_weights=None):
         if loss_weights is None:
             loss_weights = {'mse': 1.0, 'ssim': 0.0}
 
@@ -103,10 +101,10 @@ class DNIAnomalyDetector:
                 "latent_dim": 256,
                 "conv_channels": [32, 64, 128]
             },
-            name="DNI Anomaly Detector - Lightweight"
+            name="DNI Anomaly Detector - Lightweight - No Yolo"
         )
 
-        dataset = DNIDataset(data_dir, self.transform)
+        dataset = DNIDataset(data_dir)
         train_size = int(0.8 * len(dataset))
         val_size = len(dataset) - train_size
         train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
@@ -232,7 +230,7 @@ class DNIAnomalyDetector:
             # Guardar mejor modelo
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                self.save_model('dni_anomaly_detector.pt')
+                self.save_model(model_name)
                 print(f"✓ Nuevo mejor modelo guardado (val_loss: {val_loss:.6f})")
                 wandb.run.summary["best_val_loss"] = val_loss
                 # Guardar mejor modelo en wandb
@@ -240,7 +238,7 @@ class DNIAnomalyDetector:
                     f"best_model_{wandb.run.id}", type="model",
                     description=f"Mejor modelo con val_loss: {val_loss:.6f}"
                 )
-                artifact.add_file('dni_anomaly_detector_old.pt')
+                artifact.add_file(model_name)
                 wandb.log_artifact(artifact)
             else:
                 no_improve_count += 1
@@ -371,11 +369,12 @@ def main():
 
     # Entrenar el modelo
     train_losses, val_losses = detector.train_model(
-        data_dir="recortes",
-        epochs=30,
+        data_dir="autoencoder_data/train_images_without_YOLO",
+        model_name="dni_anomaly_detector_without_yolo.pt",
+        epochs=10,
         batch_size=64,
         learning_rate=1e-3,
-        loss_weights={'mse': 0.8, 'ssim': 0.2}
+        loss_weights={'mse': 1.0, 'ssim': 0.0}
     )
 
 if __name__ == "__main__":

@@ -1,11 +1,12 @@
 dniDorso
 dniFrente
 test
-testJupyter
+autoencoder_data/testJupyter
 wandb
 YOLODataset_seg
-dni_anomaly_detector_old.pt
-dni_anomaly_detector.pt
+*.pt
+*.joblib
 api/best.pt
 *.jpg
 *.png
+__pycache__

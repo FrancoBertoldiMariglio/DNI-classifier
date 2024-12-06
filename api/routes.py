@@ -16,11 +16,11 @@ logger = logging.getLogger(__name__)
 
 # Configuración
 YOLO_PATH = "best.pt"
-AUTOENCODER_PATH = "../dni_anomaly_detector_old.pt"
+AUTOENCODER_PATH = "../models/dni_anomaly_detector_old.pt"
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Lista blanca de labels válidos
-VALID_LABELS = ['FrenteValido', 'DorsoValido']
+VALID_LABELS = ['train_frente', 'train_dorso']
 
 
 class DNIValidator:
