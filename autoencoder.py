@@ -232,7 +232,7 @@ class DNIAnomalyDetector:
             # Guardar mejor modelo
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                self.save_model('api/dni_anomaly_detector.pt')
+                self.save_model('dni_anomaly_detector.pt')
                 print(f"✓ Nuevo mejor modelo guardado (val_loss: {val_loss:.6f})")
                 wandb.run.summary["best_val_loss"] = val_loss
                 # Guardar mejor modelo en wandb
@@ -240,7 +240,7 @@ class DNIAnomalyDetector:
                     f"best_model_{wandb.run.id}", type="model",
                     description=f"Mejor modelo con val_loss: {val_loss:.6f}"
                 )
-                artifact.add_file('dni_anomaly_detector.pt')
+                artifact.add_file('dni_anomaly_detector_old.pt')
                 wandb.log_artifact(artifact)
             else:
                 no_improve_count += 1
@@ -375,7 +375,7 @@ def main():
         epochs=30,
         batch_size=64,
         learning_rate=1e-3,
-        loss_weights={'mse': 1.0, 'ssim': 0.0}
+        loss_weights={'mse': 0.8, 'ssim': 0.2}
     )
 
 if __name__ == "__main__":

@@ -4,7 +4,8 @@ test
 testJupyter
 wandb
 YOLODataset_seg
-api/dni_anomaly_detector.pt
+dni_anomaly_detector_old.pt
+dni_anomaly_detector.pt
 api/best.pt
 *.jpg
 *.png

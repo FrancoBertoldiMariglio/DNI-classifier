@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 # Configuración
 YOLO_PATH = "best.pt"
-AUTOENCODER_PATH = "dni_anomaly_detector.pt"
+AUTOENCODER_PATH = "../dni_anomaly_detector_old.pt"
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Lista blanca de labels válidos
