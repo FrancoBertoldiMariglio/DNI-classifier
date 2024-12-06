@@ -188,10 +188,6 @@ class DNIAnomalyDetector:
             val_ssim_losses = []
             reconstruction_errors = []
 
-            # Calcular umbral de anomalía
-            self.threshold = np.percentile(reconstruction_errors, 95)
-            wandb.run.summary["anomaly_threshold"] = self.threshold
-
             # Validation
             val_bar = tqdm(val_loader, desc="Validation")
             with torch.no_grad():
@@ -211,6 +207,10 @@ class DNIAnomalyDetector:
                     val_loss += loss.item()
 
                     val_bar.set_postfix({'val_loss': f'{loss.item():.4f}'})
+
+            # Calcular umbral de anomalía
+            self.threshold = np.percentile(reconstruction_errors, 95)
+            wandb.run.summary["anomaly_threshold"] = self.threshold
 
             val_loss = val_loss / len(val_loader)
             val_losses.append(val_loss)
@@ -264,22 +264,10 @@ class DNIAnomalyDetector:
         return train_losses, val_losses
 
     def predict(self, image_path, loss_weights=None):
-        """
-        Predict if an image is anomalous.
-
-        Args:
-            image_path (str): Path to the image to predict
-            loss_weights (dict): Weights for MSE and SSIM loss, same as training
-
-        Returns:
-            float: Confidence score between 0 and 1, where:
-                   1 = perfect reconstruction (normal)
-                   0 = poor reconstruction (anomaly)
-        """
         if loss_weights is None:
             loss_weights = {'mse': 1.0, 'ssim': 0.0}
-        if self.threshold is None or self.threshold <= 0:
-            raise ValueError(f"Invalid threshold value: {self.threshold}")
+        if self.threshold is None:
+            raise ValueError("Model needs to be trained first to establish threshold")
 
         self.encoder.eval()
         self.decoder.eval()
@@ -292,18 +280,15 @@ class DNIAnomalyDetector:
             latent = self.encoder(image_tensor)
             reconstructed = self.decoder(latent)
 
+            # Usar MSELoss igual que en entrenamiento
             mse_criterion = nn.MSELoss()
-            ssim_criterion = SSIM().to(self.device)
+            reconstruction_error = mse_criterion(reconstructed, image_tensor).item()
 
-            mse_loss = mse_criterion(reconstructed, image_tensor)
-            ssim_loss = 1 - ssim_criterion(reconstructed, image_tensor)
+            # Calcular score de confianza usando sigmoide
+            normalized_error = reconstruction_error / self.threshold
+            confidence = 1 / (1 + np.exp(5 * (normalized_error - 1)))
 
-            combined_loss = loss_weights['mse'] * mse_loss + loss_weights['ssim'] * ssim_loss
-            loss_value = combined_loss.item()
-
-            confidence = max(0.0, min(1.0, 1.0 - (loss_value / self.threshold)))
-
-        return confidence
+        return confidence, reconstruction_error
 
     def save_model(self, path):
         torch.save({
