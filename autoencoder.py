@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from math import exp
 import torch.nn.functional as torch_functional
 from tqdm import tqdm
+from torchvision.models import vgg16
 
 
 class DNIDataset(Dataset):
@@ -124,7 +125,7 @@ class DNIAnomalyDetector:
             optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-6, verbose=True
         )
 
-        mse_criterion = nn.MSELoss()
+        perceptual_criterion = PerceptualLoss(layers=['conv3_2', 'conv4_2']).to(self.device)
         ssim_criterion = SSIM()
 
         train_losses = []
@@ -140,7 +141,7 @@ class DNIAnomalyDetector:
             self.decoder.train()
             epoch_loss = 0
             batch_losses = []
-            mse_losses = []
+            perceptual_losses = []
             ssim_losses = []
 
             train_bar = tqdm(train_loader, desc="Training")
@@ -150,16 +151,19 @@ class DNIAnomalyDetector:
                 latent = self.encoder(imgs)
                 reconstructed = self.decoder(latent)
 
-                mse_loss = mse_criterion(reconstructed, imgs)
+                normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+                imgs = normalize(imgs)
+
+                perceptual_loss = perceptual_criterion(reconstructed, imgs)
                 ssim_loss = 1 - ssim_criterion(reconstructed, imgs)
-                loss = loss_weights["mse"] * mse_loss + loss_weights["ssim"] * ssim_loss
+                loss = loss_weights["mse"] * perceptual_loss + loss_weights["ssim"] * ssim_loss
 
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
 
                 batch_losses.append(loss.item())
-                mse_losses.append(mse_loss.item())
+                perceptual_losses.append(perceptual_loss.item())
                 ssim_losses.append(ssim_loss.item())
                 epoch_loss += loss.item()
 
@@ -174,7 +178,7 @@ class DNIAnomalyDetector:
             # Logging métricas de entrenamiento
             epoch_metrics.update({
                 'train_loss': train_loss,
-                'train_mse': np.mean(mse_losses),
+                'train_perceptual': np.mean(perceptual_losses),
                 'train_ssim': np.mean(ssim_losses),
             })
 
@@ -182,7 +186,7 @@ class DNIAnomalyDetector:
             self.encoder.eval()
             self.decoder.eval()
             val_loss = 0
-            val_mse_losses = []
+            val_perceptual_losses = []
             val_ssim_losses = []
             reconstruction_errors = []
 
@@ -195,13 +199,13 @@ class DNIAnomalyDetector:
                     reconstructed = self.decoder(latent)
 
                     # Calcular pérdidas
-                    mse_loss = mse_criterion(reconstructed, imgs)
+                    perceptual_loss = perceptual_criterion(reconstructed, imgs)
                     ssim_loss = 1 - ssim_criterion(reconstructed, imgs)
                     loss = loss_weights["mse"] * mse_loss + loss_weights["ssim"] * ssim_loss
 
-                    val_mse_losses.append(mse_loss.item())
+                    val_perceptual_losses.append(perceptual_loss.item())
                     val_ssim_losses.append(ssim_loss.item())
-                    reconstruction_errors.append(mse_loss.item())
+                    reconstruction_errors.append(perceptual_loss.item())
                     val_loss += loss.item()
 
                     val_bar.set_postfix({'val_loss': f'{loss.item():.4f}'})
@@ -216,7 +220,7 @@ class DNIAnomalyDetector:
             # Logging métricas de validación
             epoch_metrics.update({
                 'val_loss': val_loss,
-                'val_mse': np.mean(val_mse_losses),
+                'val_mse': np.mean(val_perceptual_losses),
                 'val_ssim': np.mean(val_ssim_losses),
                 'learning_rate': optimizer.param_groups[0]['lr']
             })
@@ -279,8 +283,8 @@ class DNIAnomalyDetector:
             reconstructed = self.decoder(latent)
 
             # Usar MSELoss igual que en entrenamiento
-            mse_criterion = nn.MSELoss()
-            reconstruction_error = mse_criterion(reconstructed, image_tensor).item()
+            perceptual_criterion = PerceptualLoss(layers=['conv3_2', 'conv4_2']).to(self.device)
+            reconstruction_error = perceptual_criterion(reconstructed, image_tensor).item()
 
             # Calcular score de confianza usando sigmoide
             normalized_error = reconstruction_error / self.threshold
@@ -360,6 +364,42 @@ class SSIM(nn.Module):
         else:
             return ssim_map.mean(1).mean(1).mean(1)
 
+
+class PerceptualLoss(nn.Module):
+    def __init__(self, layers=['conv3_2', 'conv4_2'], requires_grad=False):
+        super(PerceptualLoss, self).__init__()
+        vgg = vgg16(pretrained=True).features
+        if not requires_grad:
+            for param in vgg.parameters():
+                param.requires_grad = False
+
+        self.layers = layers
+        self.selected_layers = {
+            'conv1_2': 3,
+            'conv2_2': 8,
+            'conv3_2': 15,
+            'conv4_2': 22,
+            'conv5_2': 29
+        }
+        self.model = nn.Sequential(*[vgg[i] for i in range(max(self.selected_layers[layer] for layer in layers) + 1)])
+
+    def forward(self, x, y):
+        features_x = {}
+        features_y = {}
+
+        for name, layer in zip(self.selected_layers, self.model):
+            x = layer(x)
+            y = layer(y)
+
+            if name in self.layers:
+                features_x[name] = x
+                features_y[name] = y
+
+        loss = 0
+        for layer in self.layers:
+            loss += torch.nn.functional.mse_loss(features_x[layer], features_y[layer])
+
+        return loss
 
 # Ejemplo de uso
 def main():
