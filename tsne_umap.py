@@ -52,7 +52,7 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model_path = "models/dni_anomaly_detector.pt"
     normal_data_dir = "autoencoder_data/train_all"
-    anomaly_data_dir = "test/invalid"
+    anomaly_data_dir = "Dni fotocopias (2)"
 
     print("Extracting normal embeddings...")
     normal_embeddings = extract_embeddings(model_path, normal_data_dir, device=device)

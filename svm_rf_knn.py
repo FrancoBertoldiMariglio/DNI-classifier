@@ -148,7 +148,7 @@ def main():
     # Training and validation paths
     train_normal_dir = "autoencoder_data/train_all"
     train_anomaly_dir = "svm_data/invalidTrain"
-    val_normal_dir = "test/valid"
+    val_normal_dir = "test/original/valid"
     val_anomaly_dir = "svm_data/invalidVal"
 
     print("Training SVM and evaluating on validation set...")

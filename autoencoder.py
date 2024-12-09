@@ -19,7 +19,7 @@ class DNIDataset(Dataset):
         self.data_dir = Path(data_dir)
         self.image_paths = list(self.data_dir.glob('*.jpg'))
         self.transform = transform or transforms.Compose([
-            transforms.Resize((224, 224)),
+            transforms.Resize((128, 128)),
             transforms.ToTensor(),
         ])
 
@@ -38,31 +38,45 @@ class Encoder(nn.Module):
     def __init__(self):
         super(Encoder, self).__init__()
         self.conv = nn.Sequential(
-            nn.Conv2d(3, 32, 3, stride=2, padding=1), nn.ReLU(),
-            nn.Conv2d(32, 64, 3, stride=2, padding=1), nn.ReLU(),
-            nn.Conv2d(64, 128, 3, stride=2, padding=1), nn.ReLU(),
+            nn.Conv2d(3, 16, 3, stride=1, padding=1),  # 128x128 -> 128x128
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),  # 128x128 -> 64x64
+
+            nn.Conv2d(16, 8, 3, stride=1, padding=1),  # 64x64 -> 64x64
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),  # 64x64 -> 32x32
+
+            nn.Conv2d(8, 8, 3, stride=1, padding=1),  # 32x32 -> 32x32
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2)  # 32x32 -> 16x16
         )
-        self.fc = nn.Linear(128 * 28 * 28, 256)
 
     def forward(self, x):
         x = self.conv(x)
-        x = x.view(x.size(0), -1)
-        x = self.fc(x)
         return x
+
 
 class Decoder(nn.Module):
     def __init__(self):
         super(Decoder, self).__init__()
-        self.fc = nn.Linear(256, 128 * 28 * 28)
         self.deconv = nn.Sequential(
-            nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1, output_padding=1), nn.ReLU(),
-            nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=1), nn.ReLU(),
-            nn.ConvTranspose2d(32, 3, 3, stride=2, padding=1, output_padding=1), nn.Sigmoid(),
+            nn.ConvTranspose2d(8, 8, 3, stride=1, padding=1),  # 16x16 -> 16x16
+            nn.ReLU(),
+            nn.Upsample(scale_factor=2, mode='nearest'),  # 16x16 -> 32x32
+
+            nn.ConvTranspose2d(8, 8, 3, stride=1, padding=1),  # 32x32 -> 32x32
+            nn.ReLU(),
+            nn.Upsample(scale_factor=2, mode='nearest'),  # 32x32 -> 64x64
+
+            nn.ConvTranspose2d(8, 16, 3, stride=1, padding=1),  # 64x64 -> 64x64
+            nn.ReLU(),
+            nn.Upsample(scale_factor=2, mode='nearest'),  # 64x64 -> 128x128
+
+            nn.ConvTranspose2d(16, 3, 3, stride=1, padding=1),  # 128x128 -> 128x128
+            nn.Sigmoid()  # Salida en el rango [0, 1]
         )
 
     def forward(self, x):
-        x = self.fc(x)
-        x = x.view(x.size(0), 128, 28, 28)
         x = self.deconv(x)
         return x
 
@@ -72,9 +86,9 @@ class DNIAnomalyDetector:
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.encoder = Encoder().to(self.device)
         self.decoder = Decoder().to(self.device)
-        self.threshold = None
+        self.thresholds = {}
         self.transform = transforms.Compose([
-            transforms.Resize((224, 224)),
+            transforms.Resize((128, 128)),
             transforms.ToTensor(),
         ])
 
@@ -91,17 +105,20 @@ class DNIAnomalyDetector:
                 "epochs": epochs,
                 "batch_size": batch_size,
                 "learning_rate": learning_rate,
-                "weight_decay": 1e-4,
-                "scheduler_factor": 0.5,
-                "scheduler_patience": 5,
-                "loss_weights": {
+                "scheduler": {
+                    "name": "CosineAnnealingLR",
+                    "T_max": 50,
+                    "eta_min": 1e-6
+                },
+                "loss": {
+                    "name": "MSE + SSIM",
                     "mse": loss_weights["mse"],
                     "ssim": loss_weights["ssim"]
                 },
                 "latent_dim": 256,
                 "conv_channels": [32, 64, 128]
             },
-            name="DNI Anomaly Detector - Lightweight - No Yolo"
+            name="DNI Anomaly Detector - Lightweight - New Architecture, New scheduler",
         )
 
         dataset = DNIDataset(data_dir)
@@ -120,9 +137,11 @@ class DNIAnomalyDetector:
 
         optimizer = optim.AdamW(list(self.encoder.parameters()) + list(self.decoder.parameters()), lr=learning_rate)
 
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-6, verbose=True
-        )
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                        optimizer,
+                        T_max=50,
+                        eta_min=1e-6
+                    )
 
         mse_criterion = nn.MSELoss()
         ssim_criterion = SSIM()
@@ -207,8 +226,10 @@ class DNIAnomalyDetector:
                     val_bar.set_postfix({'val_loss': f'{loss.item():.4f}'})
 
             # Calcular umbral de anomalía
-            self.threshold = np.percentile(reconstruction_errors, 95)
-            wandb.run.summary["anomaly_threshold"] = self.threshold
+            self.thresholds = {'90': np.percentile(reconstruction_errors, 95),
+                               '95': np.percentile(reconstruction_errors, 95),
+                               '99': np.percentile(reconstruction_errors, 99)}
+            wandb.run.summary["anomaly_thresholds"] = self.thresholds
 
             val_loss = val_loss / len(val_loader)
             val_losses.append(val_loss)
@@ -225,7 +246,7 @@ class DNIAnomalyDetector:
             wandb.log(epoch_metrics)
 
             # Actualizar learning rate
-            scheduler.step(val_loss)
+            scheduler.step()
 
             # Guardar mejor modelo
             if val_loss < best_val_loss:
@@ -254,18 +275,27 @@ class DNIAnomalyDetector:
 
         print("\nEntrenamiento completado:")
         print(f"Mejor val_loss: {best_val_loss:.6f}")
-        print(f"Umbral de anomalía: {self.threshold:.6f}")
+        print(f"Umbrales de anomalía:")
+        for percentile, value in self.thresholds.items():
+            print(f"  {percentile}%: {value:.6f}")
 
         # Cerrar wandb
         wandb.finish()
 
         return train_losses, val_losses
 
-    def predict(self, image_path, loss_weights=None):
+    def predict(self, image_path, threshold_option, loss_weights=None):
         if loss_weights is None:
             loss_weights = {'mse': 1.0, 'ssim': 0.0}
-        if self.threshold is None:
+        if self.thresholds is None:
             raise ValueError("Model needs to be trained first to establish threshold")
+
+        valid_thresholds = ['90', '95', '99']
+
+        if threshold_option not in valid_thresholds:
+            raise ValueError(f"Threshold option must be one of {valid_thresholds}")
+
+        threshold = self.thresholds[threshold_option]
 
         self.encoder.eval()
         self.decoder.eval()
@@ -274,16 +304,18 @@ class DNIAnomalyDetector:
         image = Image.open(image_path).convert('RGB')
         image_tensor = self.transform(image).unsqueeze(0).to(self.device)
 
-        with torch.no_grad():
+        with (torch.no_grad()):
             latent = self.encoder(image_tensor)
             reconstructed = self.decoder(latent)
 
             # Usar MSELoss igual que en entrenamiento
             mse_criterion = nn.MSELoss()
-            reconstruction_error = mse_criterion(reconstructed, image_tensor).item()
+            ssim_criterion = SSIM()
+            reconstruction_error = mse_criterion(reconstructed, image_tensor).item() * loss_weights["mse"] + \
+                                    (1 - ssim_criterion(reconstructed, image_tensor).item() * loss_weights["ssim"])
 
             # Calcular score de confianza usando sigmoide
-            normalized_error = reconstruction_error / self.threshold
+            normalized_error = reconstruction_error / threshold
             confidence = 1 / (1 + np.exp(5 * (normalized_error - 1)))
 
         return confidence, reconstruction_error
@@ -292,15 +324,14 @@ class DNIAnomalyDetector:
         torch.save({
             'encoder_state_dict': self.encoder.state_dict(),
             'decoder_state_dict': self.decoder.state_dict(),
-            'threshold': self.threshold
+            'thresholds': self.thresholds
         }, path)
 
     def load_model(self, path):
         checkpoint = torch.load(path)
         self.encoder.load_state_dict(checkpoint['encoder_state_dict'])
         self.decoder.load_state_dict(checkpoint['decoder_state_dict'])
-        self.threshold = checkpoint['threshold']
-
+        self.thresholds = checkpoint['thresholds']
 
 # SSIM Loss
 class SSIM(nn.Module):
@@ -369,8 +400,8 @@ def main():
 
     # Entrenar el modelo
     train_losses, val_losses = detector.train_model(
-        data_dir="autoencoder_data/train_images_without_YOLO",
-        model_name="dni_anomaly_detector_without_yolo.pt",
+        data_dir="autoencoder_data/train_all",
+        model_name="dni_anomaly_detector_ssim.pt",
         epochs=10,
         batch_size=64,
         learning_rate=1e-3,
