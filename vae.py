@@ -3,8 +3,6 @@ import torch.nn as nn
 import torch.optim as optim
 from torchvision.models import vgg16
 
-import wandb
-from torch.distributed.checkpoint import load_state_dict
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from PIL import Image
@@ -36,62 +34,74 @@ class DNIDataset(Dataset):
         return image
 
 
-class Encoder(nn.Module):
+class VAEEncoder(nn.Module):
     def __init__(self, latent_dim=512):
-        super(Encoder, self).__init__()
+        super(VAEEncoder, self).__init__()
         self.conv = nn.Sequential(
-            nn.Conv2d(3, 32, 3, stride=2, padding=1),  # 480x480 -> 240x240
+            nn.Conv2d(3, 32, 3, stride=2, padding=1),  # 224x224 -> 112x112
+            nn.BatchNorm2d(32),
             nn.ReLU(),
-            nn.Conv2d(32, 64, 3, stride=2, padding=1),  # 240x240 -> 120x120
+            nn.Conv2d(32, 64, 3, stride=2, padding=1),  # 112x112 -> 56x56
+            nn.BatchNorm2d(64),
             nn.ReLU(),
-            nn.Conv2d(64, 128, 3, stride=2, padding=1),  # 120x120 -> 60x60
+            nn.Conv2d(64, 128, 3, stride=2, padding=1),  # 56x56 -> 28x28
+            nn.BatchNorm2d(128),
             nn.ReLU(),
-            nn.Conv2d(128, 256, 3, stride=2, padding=1),  # 60x60 -> 30x30
+            nn.Conv2d(128, 256, 3, stride=2, padding=1),  # 28x28 -> 14x14
+            nn.BatchNorm2d(256),
             nn.ReLU(),
-            nn.Conv2d(256, 512, 3, stride=2, padding=1),  # 30x30 -> 15x15
+            nn.Conv2d(256, 512, 3, stride=2, padding=1),  # 14x14 -> 7x7
+            nn.BatchNorm2d(512),
             nn.ReLU(),
         )
-        # Ajustar la dimensión de entrada: 512 * 15 * 15
-        self.fc = nn.Linear(512 * 7 * 7, latent_dim)
+
+        self.fc_mu = nn.Linear(512 * 7 * 7, latent_dim)
+        self.fc_logvar = nn.Linear(512 * 7 * 7, latent_dim)
 
     def forward(self, x):
         x = self.conv(x)
         x = x.view(x.size(0), -1)
-        x = self.fc(x)
-        return x
+        mu = self.fc_mu(x)
+        logvar = self.fc_logvar(x)
+        return mu, logvar
 
-class Decoder(nn.Module):
+
+class VAEDecoder(nn.Module):
     def __init__(self, latent_dim=512):
-        super(Decoder, self).__init__()
-        # Capa fully connected para expandir
+        super(VAEDecoder, self).__init__()
         self.fc = nn.Linear(latent_dim, 512 * 7 * 7)
 
         self.deconv = nn.Sequential(
-            nn.ConvTranspose2d(512, 256, 3, stride=2, padding=1, output_padding=1),  # 15x15 -> 30x30
+            nn.ConvTranspose2d(512, 256, 3, stride=2, padding=1, output_padding=1),  # 7x7 -> 14x14
+            nn.BatchNorm2d(256),
             nn.ReLU(),
-            nn.ConvTranspose2d(256, 128, 3, stride=2, padding=1, output_padding=1),  # 30x30 -> 60x60
+            nn.ConvTranspose2d(256, 128, 3, stride=2, padding=1, output_padding=1),  # 14x14 -> 28x28
+            nn.BatchNorm2d(128),
             nn.ReLU(),
-            nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1, output_padding=1),  # 60x60 -> 120x120
+            nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1, output_padding=1),  # 28x28 -> 56x56
+            nn.BatchNorm2d(64),
             nn.ReLU(),
-            nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=1),  # 120x120 -> 240x240
+            nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=1),  # 56x56 -> 112x112
+            nn.BatchNorm2d(32),
             nn.ReLU(),
-            nn.ConvTranspose2d(32, 3, 3, stride=2, padding=1, output_padding=1),  # 240x240 -> 480x480
+            nn.ConvTranspose2d(32, 3, 3, stride=2, padding=1, output_padding=1),  # 112x112 -> 224x224
             nn.Sigmoid()
         )
 
-    def forward(self, x):
-        x = self.fc(x)
-        x = x.view(x.size(0), 512, 7, 7)  # Redimensionar a 512x15x15
+    def forward(self, z):
+        x = self.fc(z)
+        x = x.view(x.size(0), 512, 7, 7)
         x = self.deconv(x)
         return x
 
 
-class DNIAnomalyDetector:
+class DNIVAEDetector:
     def __init__(self, device=None):
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.encoder = Encoder().to(self.device)
-        self.decoder = Decoder().to(self.device)
+        self.encoder = VAEEncoder().to(self.device)
+        self.decoder = VAEDecoder().to(self.device)
         self.thresholds = {}
+        self.training = False
         self.transform = transforms.Compose([
             transforms.Resize((224, 224)),
             transforms.ToTensor(),
@@ -101,35 +111,43 @@ class DNIAnomalyDetector:
         self.ssim_criterion = SSIM().to(self.device)
         self.perceptual_criterion = PerceptualLoss().to(self.device)
 
+    def reparameterize(self, mu, logvar):
+        if self.encoder.training:
+            std = torch.exp(0.5 * logvar)
+            eps = torch.randn_like(std)
+            return mu + eps * std
+        return mu
+
+    def compute_loss(self, reconstructed, original, mu, logvar, loss_weights):
+        """
+        Calcula la pérdida total del VAE
+        """
+        # Pérdida de reconstrucción
+        mse_loss = self.mse_criterion(reconstructed, original)
+        ssim_loss = 1 - self.ssim_criterion(reconstructed, original)
+        perceptual_loss = self.perceptual_criterion(reconstructed, original)
+
+        # Pérdida de reconstrucción ponderada
+        recon_loss = (loss_weights["mse"] * mse_loss +
+                      loss_weights["ssim"] * ssim_loss +
+                      loss_weights["perceptual"] * perceptual_loss)
+
+        # KL Divergence
+        kld_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+
+        # Pérdida total (con factor beta para KLD)
+        total_loss = recon_loss + loss_weights.get("kld", 0.1) * kld_loss
+
+        return total_loss, recon_loss, kld_loss
+
     def train_model(self, data_dir, model_name, epochs=30, batch_size=32, learning_rate=1e-3, loss_weights=None):
         if loss_weights is None:
-            loss_weights = {'mse': 0.7, 'ssim': 0.2, 'perceptual': 0.1}
-
-        # Actualizar la configuración de wandb
-        # wandb.init(
-        #     project="DNI Anomaly Detector - Autoencoder",
-        #     config={
-        #         "architecture": "Lightweight Autoencoder",
-        #         "dataset": data_dir,
-        #         "epochs": epochs,
-        #         "batch_size": batch_size,
-        #         "learning_rate": learning_rate,
-        #         "scheduler": {
-        #             "name": "CosineAnnealingLR",
-        #             "T_max": 100,
-        #             "eta_min": 1e-6
-        #         },
-        #         "loss": {
-        #             "name": "MSE + SSIM + Perceptual",
-        #             "mse": loss_weights["mse"],
-        #             "ssim": loss_weights["ssim"],
-        #           #  "perceptual": loss_weights["perceptual"]
-        #         },
-        #         "latent_dim": 256,
-        #         "conv_channels": [32, 64, 128, 256, 512]
-        #     },
-        #     name="DNI Anomaly Detector - MSE-SSIM-Perceptual"
-        # )
+            loss_weights = {
+                'mse': 0.7,
+                'ssim': 0.2,
+                'perceptual': 0.1,
+                'kld': 0.1  # Factor beta para KL Divergence
+            }
 
         dataset = DNIDataset(data_dir)
         train_size = int(0.8 * len(dataset))
@@ -143,7 +161,6 @@ class DNIAnomalyDetector:
         val_loader = DataLoader(val_dataset, batch_size=batch_size)
 
         print(f"Dataset cargado: {len(train_dataset)} imágenes de entrenamiento, {len(val_dataset)} de validación")
-        # wandb.log({"train_size": len(train_dataset), "val_size": len(val_dataset)})
 
         optimizer = optim.AdamW(list(self.encoder.parameters()) + list(self.decoder.parameters()),
                                 lr=learning_rate,
@@ -151,13 +168,10 @@ class DNIAnomalyDetector:
                                 betas=(0.9, 0.999))
 
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
-                        optimizer,
-                        T_max=100,
-                        eta_min=1e-6
-                    )
-
-        mse_criterion = nn.MSELoss()
-        ssim_criterion = SSIM()
+            optimizer,
+            T_max=100,
+            eta_min=1e-6
+        )
 
         train_losses = []
         val_losses = []
@@ -165,40 +179,38 @@ class DNIAnomalyDetector:
 
         for epoch in range(epochs):
             print(f"\nEpoch [{epoch + 1}/{epochs}]")
-            epoch_metrics = {'epoch': epoch + 1}
 
             # Training
             self.encoder.train()
             self.decoder.train()
             epoch_loss = 0
             batch_losses = []
-            mse_losses = []
-            ssim_losses = []
-            perceptual_losses = []
+            recon_losses = []
+            kld_losses = []
 
             train_bar = tqdm(train_loader, desc="Training")
             for batch in train_bar:
                 imgs = batch.to(self.device)
 
-                latent = self.encoder(imgs)
-                reconstructed = self.decoder(latent)
+                # Forward pass
+                mu, logvar = self.encoder(imgs)
+                z = self.reparameterize(mu, logvar)
+                reconstructed = self.decoder(z)
 
-                mse_loss = self.mse_criterion(reconstructed, imgs)
-                ssim_loss = 1 - self.ssim_criterion(reconstructed, imgs)
-                perceptual_loss = self.perceptual_criterion(reconstructed, imgs)
+                # Calcular pérdidas
+                loss, recon_loss, kld_loss = self.compute_loss(
+                    reconstructed, imgs, mu, logvar, loss_weights
+                )
 
-                loss = (loss_weights["mse"] * mse_loss +
-                        loss_weights["ssim"] * ssim_loss +
-                        loss_weights["perceptual"] * perceptual_loss)
-
+                # Backpropagation
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
 
+                # Guardar métricas
                 batch_losses.append(loss.item())
-                mse_losses.append(mse_loss.item())
-                ssim_losses.append(ssim_loss.item())
-                perceptual_losses.append(perceptual_loss.item())
+                recon_losses.append(recon_loss.item())
+                kld_losses.append(kld_loss.item())
                 epoch_loss += loss.item()
 
                 train_bar.set_postfix({
@@ -209,67 +221,43 @@ class DNIAnomalyDetector:
             train_loss = epoch_loss / len(train_loader)
             train_losses.append(train_loss)
 
-            # Logging métricas de entrenamiento
-            epoch_metrics.update({
-                'train_loss': train_loss,
-                'train_mse': np.mean(mse_losses),
-                'train_ssim': np.mean(ssim_losses),
-                'train_perceptual': np.mean(perceptual_losses)
-            })
-
             # Validation
             self.encoder.eval()
             self.decoder.eval()
             val_loss = 0
-            val_mse_losses = []
-            val_ssim_losses = []
-            val_perceptual_losses = []
+            val_recon_losses = []
+            val_kld_losses = []
             reconstruction_errors = []
 
-            # Validation
             val_bar = tqdm(val_loader, desc="Validation")
             with torch.no_grad():
                 for batch in val_bar:
                     imgs = batch.to(self.device)
-                    latent = self.encoder(imgs)
-                    reconstructed = self.decoder(latent)
 
-                    mse_loss = self.mse_criterion(reconstructed, imgs)
-                    ssim_loss = 1 - self.ssim_criterion(reconstructed, imgs)
-                    perceptual_loss = self.perceptual_criterion(reconstructed, imgs)
+                    mu, logvar = self.encoder(imgs)
+                    z = self.reparameterize(mu, logvar)
+                    reconstructed = self.decoder(z)
 
-                    loss = (loss_weights["mse"] * mse_loss +
-                            loss_weights["ssim"] * ssim_loss +
-                            loss_weights["perceptual"] * perceptual_loss)
+                    loss, recon_loss, kld_loss = self.compute_loss(
+                        reconstructed, imgs, mu, logvar, loss_weights
+                    )
 
-                    val_mse_losses.append(mse_loss.item())
-                    val_ssim_losses.append(ssim_loss.item())
-                    val_perceptual_losses.append(perceptual_loss.item())
+                    val_recon_losses.append(recon_loss.item())
+                    val_kld_losses.append(kld_loss.item())
                     reconstruction_errors.append(loss.item())
                     val_loss += loss.item()
 
                     val_bar.set_postfix({'val_loss': f'{loss.item():.4f}'})
 
             # Calcular umbral de anomalía
-            self.thresholds = {'90': np.percentile(reconstruction_errors, 95),
-                               '95': np.percentile(reconstruction_errors, 95),
-                               '99': np.percentile(reconstruction_errors, 99)}
-            # wandb.run.summary["anomaly_thresholds"] = self.thresholds
+            self.thresholds = {
+                '90': np.percentile(reconstruction_errors, 90),
+                '95': np.percentile(reconstruction_errors, 95),
+                '99': np.percentile(reconstruction_errors, 99)
+            }
 
             val_loss = val_loss / len(val_loader)
             val_losses.append(val_loss)
-
-            # Logging métricas de validación
-            epoch_metrics.update({
-                'val_loss': val_loss,
-                'val_mse': np.mean(val_mse_losses),
-                'val_ssim': np.mean(val_ssim_losses),
-                'val_perceptual': np.mean(val_perceptual_losses),
-                'learning_rate': optimizer.param_groups[0]['lr']
-            })
-
-            # Log métricas a wandb
-            # wandb.log(epoch_metrics)
 
             # Actualizar learning rate
             scheduler.step()
@@ -279,14 +267,6 @@ class DNIAnomalyDetector:
                 best_val_loss = val_loss
                 self.save_model(model_name)
                 print(f"✓ Nuevo mejor modelo guardado (val_loss: {val_loss:.6f})")
-                # wandb.run.summary["best_val_loss"] = val_loss
-                # Guardar mejor modelo en wandb
-                # artifact = wandb.Artifact(
-                #     f"best_model_{wandb.run.id}", type="model",
-                #     description=f"Mejor modelo con val_loss: {val_loss:.6f}"
-                # )
-                # artifact.add_file(model_name)
-                # wandb.log_artifact(artifact)
                 no_improve_count = 0
             else:
                 no_improve_count += 1
@@ -306,14 +286,16 @@ class DNIAnomalyDetector:
         for percentile, value in self.thresholds.items():
             print(f"  {percentile}%: {value:.6f}")
 
-        # Cerrar wandb
-        # wandb.finish()
-
         return train_losses, val_losses
 
     def predict(self, image_path, threshold_option, loss_weights=None, return_images=False):
         if loss_weights is None:
-            loss_weights = {'mse': 0.6, 'ssim': 0.25, 'perceptual': 0.15}  # Actualizar valores por defecto
+            loss_weights = {
+                'mse': 0.6,
+                'ssim': 0.25,
+                'perceptual': 0.15,
+                'kld': 0.1
+            }
 
         if self.thresholds is None:
             raise ValueError("Model needs to be trained first to establish threshold")
@@ -332,17 +314,13 @@ class DNIAnomalyDetector:
         image_tensor = self.transform(image).unsqueeze(0).to(self.device)
 
         with torch.no_grad():
-            latent = self.encoder(image_tensor)
-            reconstructed = self.decoder(latent)
+            mu, logvar = self.encoder(image_tensor)
+            z = self.reparameterize(mu, logvar)
+            reconstructed = self.decoder(z)
 
-            # Calcular pérdidas exactamente igual que en validación
-            mse_loss = self.mse_criterion(reconstructed, image_tensor)
-            ssim_loss = 1 - self.ssim_criterion(reconstructed, image_tensor)
-            perceptual_loss = self.perceptual_criterion(reconstructed, image_tensor)
-
-            loss = (loss_weights["mse"] * mse_loss +
-                    loss_weights["ssim"] * ssim_loss +
-                    loss_weights["perceptual"] * perceptual_loss)
+            loss, recon_loss, kld_loss = self.compute_loss(
+                reconstructed, image_tensor, mu, logvar, loss_weights
+            )
 
             reconstruction_error = loss.item()
 
@@ -353,6 +331,7 @@ class DNIAnomalyDetector:
         if return_images:
             return confidence, reconstruction_error, image_tensor.squeeze(0), reconstructed.squeeze(0)
         return confidence, reconstruction_error
+
     def save_model(self, path):
         torch.save({
             'encoder_state_dict': self.encoder.state_dict(),
@@ -365,6 +344,7 @@ class DNIAnomalyDetector:
         self.encoder.load_state_dict(checkpoint['encoder_state_dict'])
         self.decoder.load_state_dict(checkpoint['decoder_state_dict'])
         self.thresholds = checkpoint['thresholds']
+
 
 # SSIM Loss
 class SSIM(nn.Module):
@@ -462,25 +442,39 @@ class PerceptualLoss(nn.Module):
         return loss
 
 
-# Ejemplo de uso
 def main():
     # Inicializar el detector
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    detector = DNIAnomalyDetector(device=device)
+    detector = DNIVAEDetector(device=device)
+
+    # Configurar pesos de pérdida
+    loss_weights = {
+        'mse': 0.7,
+        'ssim': 0.2,
+        'perceptual': 0.1,
+        'kld': 0.1
+    }
 
     # Entrenar el modelo
     train_losses, val_losses = detector.train_model(
-        data_dir="archive/training_set/training_set/cats",
-        model_name="detector_de_gatos.pt",
+        data_dir="autoencoder_data/train_all",
+        model_name="vae_model.pt",
         epochs=10,
         batch_size=32,
         learning_rate=1e-4,
-        loss_weights={
-            'mse': 1.0,
-            'ssim': 0.0,
-            'perceptual': 0.0
-        }
+        loss_weights=loss_weights
     )
+
+    # Ejemplo de predicción
+    confidence, error = detector.predict(
+        image_path="test/original/valid/0a1e89f6-0ae2-4cab-854e-61c897cbbe13.jpg",
+        threshold_option='95',
+        loss_weights=loss_weights
+    )
+
+    print(f"Confidence: {confidence:.4f}")
+    print(f"Reconstruction Error: {error:.4f}")
+
 
 if __name__ == "__main__":
     main()
