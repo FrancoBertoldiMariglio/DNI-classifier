@@ -457,7 +457,7 @@ def main():
 
     # Entrenar el modelo
     train_losses, val_losses = detector.train_model(
-        data_dir="autoencoder_data/train_all",
+        data_dir="autoencoder_data/train_cropped",
         model_name="vae_model.pt",
         epochs=10,
         batch_size=32,

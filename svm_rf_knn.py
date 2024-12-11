@@ -146,7 +146,7 @@ def main():
     encoder_path = "models/dni_anomaly_detector.pt"
 
     # Training and validation paths
-    train_normal_dir = "autoencoder_data/train_all"
+    train_normal_dir = "autoencoder_data/train_cropped"
     train_anomaly_dir = "svm_data/invalidTrain"
     val_normal_dir = "test/original/valid"
     val_anomaly_dir = "svm_data/invalidVal"

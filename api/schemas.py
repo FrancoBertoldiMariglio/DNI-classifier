@@ -1,13 +1,14 @@
-from typing import Dict
-
-from pydantic import BaseModel, Field
+# Esquemas Pydantic actualizados
+from pydantic import BaseModel
 
 class PredictionRequest(BaseModel):
-    base64_image: str = Field(..., description="Base64 encoded image string")
+    base64_image: str
 
 class PredictionResponse(BaseModel):
-    confidence: float = Field(..., ge=0.0, le=1.0)
+    prediction: str
+    confidence: float
+    probabilities: dict[str, float]
 
 class HealthCheckResponse(BaseModel):
     status: str
-    details: Dict[str, Dict[str, str]]
+    details: dict

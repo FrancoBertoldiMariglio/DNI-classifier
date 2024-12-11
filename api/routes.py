@@ -5,78 +5,50 @@ from contextlib import asynccontextmanager
 from fastapi import APIRouter, HTTPException, Depends, FastAPI
 import logging
 from PIL import Image
-import torch
-import numpy as np
-
-from api.MachineLearningModel import DNIAnomalyDetector
-from api.schemas import PredictionRequest, PredictionResponse, HealthCheckResponse
-from ultralytics import YOLO
+from schemas import PredictionRequest, PredictionResponse, HealthCheckResponse
+from MachineLearningModel import AnomalyDetectionModel
+import tensorflow as tf
 
 logger = logging.getLogger(__name__)
 
 # Configuración
-YOLO_PATH = "best.pt"
-AUTOENCODER_PATH = "../models/dni_anomaly_detector_old.pt"
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-# Lista blanca de labels válidos
-VALID_LABELS = ['train_frente', 'train_dorso']
+AUTOENCODER_PATH = "best_model_cropped_original.keras"
+SVM_PATH = "svm_classifier.joblib"
 
 
 class DNIValidator:
     def __init__(self):
-        self.yolo_model = YOLO(YOLO_PATH)
-        self.autoencoder = DNIAnomalyDetector(device=DEVICE)
-        self.autoencoder.load_model(AUTOENCODER_PATH)
-
-    def crop_image(self, image: Image.Image, bbox) -> Image.Image:
-        """Recorta la imagen usando el bbox del YOLO."""
-        x1, y1, x2, y2 = map(int, bbox)
-        return image.crop((x1, y1, x2, y2))
-
-    def validate(self, image_path: str) -> tuple[float, str]:
-        """
-        Realiza la validación doble: YOLO + Autoencoder
-        Returns: (confidence, message)
-        """
-        # Primera validación: YOLO
-        results = self.yolo_model(image_path)[0]
-
-        # Si no hay detecciones
-        if len(results.boxes) == 0:
-            return 0.0, "No object detected"
-
-        # Obtener la detección con mayor confianza
-        confidences = results.boxes.conf.cpu().numpy()
-        best_idx = confidences.argmax()
-        box = results.boxes[best_idx]
-
-        cls_id = box.cls.item()
-        cls_name = results.names[int(cls_id)]
-        yolo_confidence = box.conf.item()
-
-        # Si la clase no está en la lista blanca
-        if cls_name not in VALID_LABELS:
-            return 0.0, f"Invalid object detected: {cls_name}"
-
-        # Recortar imagen usando el bbox
-        original_image = Image.open(image_path)
-        bbox = box.xyxy[0].cpu().numpy()
-        cropped_image = self.crop_image(original_image, bbox)
-
-        # Guardar temporalmente la imagen recortada
-        temp_crop_path = "temp_crop.jpg"
-        cropped_image.save(temp_crop_path)
-
-        # Segunda validación: Autoencoder
+        """Inicializa el detector de anomalías"""
         try:
-            autoencoder_confidence = self.autoencoder.predict(temp_crop_path)
-        finally:
-            os.remove(temp_crop_path)
+            logger.info("Initializing anomaly detector...")
 
-        # Combinar confidencias
-        final_confidence = autoencoder_confidence
-        return final_confidence, f"Valid DNI detected: {cls_name}"
+            # Forzar el uso de CPU para todas las operaciones
+            with tf.device('/CPU:0'):
+                self.anomaly_detector = AnomalyDetectionModel(
+                    autoencoder_path=AUTOENCODER_PATH,
+                    svm_path=SVM_PATH
+                )
+            logger.info("Anomaly detector initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize anomaly detector: {str(e)}")
+            raise
+
+    def validate(self, image: Image.Image) -> dict:
+        """
+        Valida una imagen usando el detector de anomalías
+        Args:
+            image: Imagen PIL a validar
+        Returns:
+            Dict con resultados de la predicción
+        """
+        try:
+            # Forzar CPU para la predicción
+            with tf.device('/CPU:0'):
+                result = self.anomaly_detector.predict_image(image)
+            return result
+        except Exception as e:
+            logger.error(f"Error during validation: {str(e)}")
+            raise
 
 
 @asynccontextmanager
@@ -114,17 +86,18 @@ def create_router() -> APIRouter:
         try:
             # Convertir base64 a imagen
             image_bytes = base64.b64decode(request.base64_image)
-            temp_path = "temp_input.jpg"
+            image = Image.open(io.BytesIO(image_bytes))
 
-            with open(temp_path, "wb") as f:
-                f.write(image_bytes)
+            # Realizar validación
+            result = validator.validate(image)
 
-            try:
-                confidence, message = validator.validate(temp_path)
-                logger.info(f"Validation result: {message} with confidence {confidence}")
-                return PredictionResponse(confidence=float(confidence))
-            finally:
-                os.remove(temp_path)
+            logger.info(f"Validation result: {result}")
+
+            return PredictionResponse(
+                prediction=result["prediction"],
+                confidence=result["confidence"],
+                probabilities=result["probabilities"]
+            )
 
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
@@ -138,7 +111,7 @@ def create_router() -> APIRouter:
         details = {
             "validator": {
                 "status": "healthy",
-                "message": "Services initialized successfully"
+                "message": "Service initialized successfully"
             },
             "resources": {
                 "status": "healthy",
@@ -147,15 +120,15 @@ def create_router() -> APIRouter:
         }
 
         # Verificar modelos
-        if not os.path.exists(YOLO_PATH):
-            status = "unhealthy"
-            details["resources"]["status"] = "unhealthy"
-            details["resources"]["message"] = f"YOLO model not found at {YOLO_PATH}"
-
         if not os.path.exists(AUTOENCODER_PATH):
             status = "unhealthy"
             details["resources"]["status"] = "unhealthy"
             details["resources"]["message"] = f"Autoencoder not found at {AUTOENCODER_PATH}"
+
+        if not os.path.exists(SVM_PATH):
+            status = "unhealthy"
+            details["resources"]["status"] = "unhealthy"
+            details["resources"]["message"] = f"SVM model not found at {SVM_PATH}"
 
         if status == "unhealthy":
             raise HTTPException(status_code=503, detail=details)

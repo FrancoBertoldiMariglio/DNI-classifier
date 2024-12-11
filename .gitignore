@@ -6,7 +6,8 @@ wandb
 YOLODataset_seg
 *.pt
 *.joblib
-api/best.pt
+api/best_yolo.pt
 *.jpg
 *.png
 __pycache__
+*.keras

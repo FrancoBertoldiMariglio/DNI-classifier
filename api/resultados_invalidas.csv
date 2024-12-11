@@ -1,0 +1,10 @@
+filename,timestamp,status,prediction,confidence,error
+DniFrente Ivan_base64.txt,2024-12-11 13:20:21,success,anomaly,90.93,
+DniDorso Maxi_base64.txt,2024-12-11 13:20:21,success,anomaly,95.07,
+Dni Fotocopia_base64.txt,2024-12-11 13:20:21,success,valid,73.58,
+Dni ticket 1_base64.txt,2024-12-11 13:20:22,success,anomaly,53.43,
+DniFrente Maxi_base64.txt,2024-12-11 13:20:22,success,anomaly,81.02,
+Dni ticket 2_base64.txt,2024-12-11 13:20:22,success,anomaly,56.15,
+DniFrente fotocopia digital_base64.txt,2024-12-11 13:20:22,success,anomaly,87.24,
+DniDorso fotocopia digital_base64.txt,2024-12-11 13:20:22,success,anomaly,86.52,
+DniDorso Ivan_base64.txt,2024-12-11 13:20:22,success,anomaly,88.09,

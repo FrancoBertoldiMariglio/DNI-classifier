@@ -72,7 +72,7 @@ def organize_by_yolo_predictions(yolo_model_path, input_dir, output_base_dir, la
 # Ejemplo de uso
 if __name__ == "__main__":
     organize_by_yolo_predictions(
-        yolo_model_path="api/best.pt",
+        yolo_model_path="api/best_yolo.pt",
         input_dir="dniDorso",
         output_base_dir="dniDorso_processed_by_class",
         labels=None

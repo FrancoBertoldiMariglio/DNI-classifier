@@ -51,7 +51,7 @@ def visualize_embeddings(embeddings, labels, method='tsne', **kwargs):
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model_path = "models/dni_anomaly_detector.pt"
-    normal_data_dir = "autoencoder_data/train_all"
+    normal_data_dir = "autoencoder_data/train_cropped"
     anomaly_data_dir = "Dni fotocopias (2)"
 
     print("Extracting normal embeddings...")
